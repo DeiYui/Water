@@ -1,1 +1,294 @@
-a
+// Khai bao thu vien
+#include <Arduino.h>
+#include <EEPROM.h>
+#include <WiFi.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <DFRobot_ESP_EC.h>
+#include <ESP_Mail_Client.h>
+
+
+//Khai bao hang
+const int oneWireBus = 25; // GPIO where the DS18B20 is connected to
+ 
+#define TdsSensorPin 35
+#define VREF 3.3      // analog reference voltage(Volt) of the ADC
+#define SCOUNT  30           // sum of sample point 
+#define TEMP_LIMIT 40 // gioi han nhiet do
+#define TDS_LIMIT 500 // gioi han tds
+
+//Khai bao bien
+
+int analogBuffer[SCOUNT];    // store the analog value in the array, read from ADC
+int analogBufferTemp[SCOUNT];
+int analogBufferIndex = 0;
+int copyIndex = 0;
+float averageVoltage = 0;
+float tdsValue = 0;
+float temperature = 0;
+float ecValue = 0;
+
+//Khoi tao instance oneWire
+ 
+OneWire oneWire(oneWireBus);    // Setup a oneWire instance to communicate with any OneWire devices
+ 
+DallasTemperature sensors(&oneWire);    // Pass our oneWire reference to Dallas Temperature sensor
+
+String apiKey = "******";     //  Enter your Write API key from ThingSpeak
+ 
+const char *ssid =  "******";     // replace with your wifi ssid and wpa2 key
+const char *pass =  "******";
+const char* server = "api.thingspeak.com";
+
+WiFiClient client;
+
+#define SMTP_HOST "smtp.gmail.com" //su dung gmail de gui mail
+#define SMTP_PORT 587
+
+/* The sign in credentials */
+#define AUTHOR_EMAIL "******" // thong tin nguoi gui
+#define AUTHOR_PASSWORD "******"
+
+/* Recipient's email*/
+#define RECIPIENT_EMAIL "******" //thong tin nguoi nhan
+
+/* The SMTP Session object used for Email sending */
+SMTPSession smtp;
+
+/* Callback function to get the Email sending status */
+void smtpCallback(SMTP_Status status);
+ 
+void setup()
+{
+  Serial.begin(115200); //bat dau chuong trinh
+  pinMode(TdsSensorPin, INPUT); //pin 35 se nhan du lieu
+  sensors.begin();
+
+  Serial.println("Connecting to ");
+  Serial.println(ssid);
+ 
+ 
+  WiFi.begin(ssid, pass);
+ 
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.println("WiFi connected");
+
+}
+ 
+void loop()
+{
+  sensors.requestTemperatures(); //thang sensor dua nhiet do cho tao
+  float temperature = sensors.getTempCByIndex(0); // ghi gia tri nhiet do vao bien
+ 
+  static unsigned long analogSampleTimepoint = millis();
+  if (millis() - analogSampleTimepoint > 40U)  //every 40 milliseconds,read the analog value from the ADC
+  {
+    analogSampleTimepoint = millis();
+    analogBuffer[analogBufferIndex] = analogRead(TdsSensorPin);    //read the analog value and store into the buffer
+    analogBufferIndex++;
+    if (analogBufferIndex == SCOUNT)
+      analogBufferIndex = 0;
+  }
+  static unsigned long printTimepoint = millis();
+  if (millis() - printTimepoint > 800U)
+  {
+    printTimepoint = millis();
+    for (copyIndex = 0; copyIndex < SCOUNT; copyIndex++)
+      analogBufferTemp[copyIndex] = analogBuffer[copyIndex];
+    averageVoltage = getMedianNum(analogBufferTemp, SCOUNT) * (float)VREF / 1024.0; // read the analog value more stable by the median filtering algorithm, and convert to voltage value
+    float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0); //temperature compensation formula: fFinalResult(25^C) = fFinalResult(current)/(1.0+0.02*(fTP-25.0));
+    float compensationVolatge = averageVoltage / compensationCoefficient; //temperature compensation
+    tdsValue = (133.42 * compensationVolatge * compensationVolatge * compensationVolatge - 255.86 * compensationVolatge * compensationVolatge + 857.39 * compensationVolatge) * 0.5; //convert voltage value to tds value
+    ecValue = tdsValue / 500.0;
+    
+    Serial.print("Temperature:");
+    Serial.print(temperature);
+    Serial.println("ºC");
+    
+    Serial.print("TDS Value:");
+    Serial.print(tdsValue, 0);
+    Serial.println("ppm");
+
+    Serial.print("EC Value:");
+    Serial.print(ecValue);
+    Serial.println("");
+ 
+  }
+
+  if (client.connect(server, 80))  //   "184.106.153.149" or api.thingspeak.com
+  {
+ 
+    String postStr = apiKey;
+    postStr += "&field1=";
+    postStr += String(temperature, 2);
+    postStr += "&field2=";
+    postStr += String(tdsValue, 2);
+    postStr += "&field3=";
+    postStr += String(ecValue, 2);
+    postStr += "\r\n\r\n";
+    delay(500);
+ 
+    client.print("POST /update HTTP/1.1\n");
+    client.print("Host: api.thingspeak.com\n");
+    client.print("Connection: close\n");
+    client.print("X-THINGSPEAKAPIKEY: " + apiKey + "\n");
+    client.print("Content-Type: application/x-www-form-urlencoded\n");
+    client.print("Content-Length: ");
+    client.print(postStr.length());
+    client.print("\n\n");
+    client.print(postStr);
+    delay(500);
+  }
+  client.stop();
+
+  if(temperature > TEMP_LIMIT) //  send an email if temperature is too high
+  {
+    smtp.debug(1);
+
+    /* Set the callback function to get the sending results */
+    smtp.callback(smtpCallback);
+  
+    /* Declare the session config data */
+    ESP_Mail_Session session;
+  
+    /* Set the session config */
+    session.server.host_name = SMTP_HOST;
+    session.server.port = SMTP_PORT;
+    session.login.email = AUTHOR_EMAIL;
+    session.login.password = AUTHOR_PASSWORD;
+    session.login.user_domain = "";
+  
+    /* Declare the message class */
+    SMTP_Message message;
+  
+    /* Set the message headers */
+    message.sender.name = "Iimizu-chan";
+    message.sender.email = AUTHOR_EMAIL;
+    message.subject = "Temperature alert!";
+    message.addRecipient("Sara", RECIPIENT_EMAIL);
+  
+    /*Send HTML message*/
+    String htmlMsg = "The temperature of your water source is too high! Immediate action is needed!";
+    message.html.content = htmlMsg.c_str();
+    message.html.content = htmlMsg.c_str();
+    message.text.charSet = "us-ascii";
+    message.html.transfer_encoding = Content_Transfer_Encoding::enc_7bit;
+  
+    /* Set the custom message header */
+    //message.addHeader("Message-ID: <abcde.fghij@gmail.com>");
+  
+    /* Connect to server with the session config */
+    if (!smtp.connect(&session))
+      return;
+  
+    /* Start sending Email and close the session */
+    if (!MailClient.sendMail(&smtp, &message))
+      Serial.println("Error sending Email, " + smtp.errorReason());
+
+    delay(5000);
+   }
+
+   if(tdsValue > TDS_LIMIT)  // send an email if TDS is too high
+  {
+    smtp.debug(1);
+
+    /* Set the callback function to get the sending results */
+    smtp.callback(smtpCallback);
+  
+    /* Declare the session config data */
+    ESP_Mail_Session session;
+  
+    /* Set the session config */
+    session.server.host_name = SMTP_HOST;
+    session.server.port = SMTP_PORT;
+    session.login.email = AUTHOR_EMAIL;
+    session.login.password = AUTHOR_PASSWORD;
+    session.login.user_domain = "";
+  
+    /* Declare the message class */
+    SMTP_Message message;
+  
+    /* Set the message headers */
+    message.sender.name = "Iimizu-chan";
+    message.sender.email = AUTHOR_EMAIL;
+    message.subject = "TDS alert!";
+    message.addRecipient("Sara", RECIPIENT_EMAIL);
+  
+    /*Send HTML message*/
+    String htmlMsg = "The TDS of your water source is above healthy limit! Immediate action is needed!";
+    message.html.content = htmlMsg.c_str();
+    message.html.content = htmlMsg.c_str();
+    message.text.charSet = "us-ascii";
+    message.html.transfer_encoding = Content_Transfer_Encoding::enc_7bit;
+  
+    /* Set the custom message header */
+    //message.addHeader("Message-ID: <abcde.fghij@gmail.com>");
+  
+    /* Connect to server with the session config */
+    if (!smtp.connect(&session))
+      return;
+  
+    /* Start sending Email and close the session */
+    if (!MailClient.sendMail(&smtp, &message))
+      Serial.println("Error sending Email, " + smtp.errorReason());
+    }
+    delay(5000);
+}
+
+int getMedianNum(int bArray[], int iFilterLen)
+{
+  int bTab[iFilterLen];
+  for (byte i = 0; i < iFilterLen; i++)
+    bTab[i] = bArray[i];
+  int i, j, bTemp;
+  for (j = 0; j < iFilterLen - 1; j++)
+  {
+    for (i = 0; i < iFilterLen - j - 1; i++)
+    {
+      if (bTab[i] > bTab[i + 1])
+      {
+        bTemp = bTab[i];
+        bTab[i] = bTab[i + 1];
+        bTab[i + 1] = bTemp;
+      }
+    }
+  }
+  if ((iFilterLen & 1) > 0)
+    bTemp = bTab[(iFilterLen - 1) / 2];
+  else
+    bTemp = (bTab[iFilterLen / 2] + bTab[iFilterLen / 2 - 1]) / 2;
+  return bTemp;
+}
+
+void smtpCallback(SMTP_Status status){
+  /* Print the current status */
+  Serial.println(status.info());
+
+  /* Print the sending result */
+  if (status.success()){
+    Serial.println("----------------");
+    ESP_MAIL_PRINTF("Message sent success: %d\n", status.completedCount());
+    ESP_MAIL_PRINTF("Message sent failled: %d\n", status.failedCount());
+    Serial.println("----------------\n");
+    struct tm dt;
+
+    for (size_t i = 0; i < smtp.sendingResult.size(); i++){
+      /* Get the result item */
+      SMTP_Result result = smtp.sendingResult.getItem(i);
+      time_t ts = (time_t)result.timestamp;
+      localtime_r(&ts, &dt);
+
+      ESP_MAIL_PRINTF("Message No: %d\n", i + 1);
+      ESP_MAIL_PRINTF("Status: %s\n", result.completed ? "success" : "failed");
+      ESP_MAIL_PRINTF("Date/Time: %d/%d/%d %d:%d:%d\n", dt.tm_year + 1900, dt.tm_mon + 1, dt.tm_mday, dt.tm_hour, dt.tm_min, dt.tm_sec);
+      ESP_MAIL_PRINTF("Recipient: %s\n", result.recipients);
+      ESP_MAIL_PRINTF("Subject: %s\n", result.subject);
+    }
+    Serial.println("----------------\n");
+  }
+}
