@@ -1,2 +1,2 @@
-Project which measures water quality
+Project which measures water quality.
 Web: https://thingspeak.com/
