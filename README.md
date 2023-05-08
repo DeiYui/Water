@@ -1,2 +1,2 @@
-Đây là project đo chất lượng nước, bao gồm code và báo cáo.
+Project which measures water quality
 Web: https://thingspeak.com/
